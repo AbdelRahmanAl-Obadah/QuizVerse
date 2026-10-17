@@ -1,11 +1,12 @@
-import { db, fn, collection, doc, getDoc, getDocs, query, where, orderBy } from './api.js';
+import { db, doc, getDoc } from './api.js';
+import { startAttempt, getAttempt, saveAnswer, recordView, finalizeAttempt, getResult } from './services.js';
 import { state, navigate, onCleanup } from './state.js';
 import { h, icon, avatar, chart, empty, loading, confirmDialog, toast, fmtDate, fmtShort, fmtN, fmtPct, fmtDur, startOfPeriod } from './ui.js';
-import { ms, USER_META, COMPLETED, STATUS_LABEL, statusClass, loadSummaries, sortBoard, loadExams, loadAttempts, availability } from './data.js';
+import { ms, USER_META, COMPLETED, STATUS_LABEL, statusClass, loadSummaries, loadSummariesSince, loadBoardData, sortBoard, loadExams, loadAttempts, availability } from './data.js';
 
 const stat = (label, value, sub) => h('div', { class: 'stat' }, h('b', {}, value), h('span', {}, label), sub && h('div', { class: 'small muted' }, sub));
 const head = (title, ...right) => h('div', { class: 'row between', style: { marginBottom: '16px' } }, h('h1', { style: { margin: 0 } }, title), h('div', { class: 'row' }, ...right));
-const done = (rows) => rows.filter((a) => COMPLETED.includes(a.status));
+const done = (rows) => rows.filter((a) => COMPLETED.includes(a.status) && !a.pending);
 
 function examCard(e, used) {
   const av = availability(e), left = Math.max(0, e.maxAttempts - used), can = av === 'open' && left > 0;
@@ -32,7 +33,7 @@ export async function dashboard(v) {
       h('div', { class: 'card' }, chart(fin.map((a) => ({ x: fmtShort(ms(a.startedAt)), y: a.accuracy })), { title: 'Accuracy progression (%)', unit: '%' })),
       h('div', { class: 'card' }, chart(fin.map((a) => ({ x: fmtShort(ms(a.startedAt)), y: a.totalPoints })), { title: 'Points earned per exam', bar: true })),
       h('div', { class: 'card' }, h('h2', {}, 'Recent results'), att.rows.length ? h('div', { class: 'stack' }, att.rows.slice(0, 5).map((a) => h('div', { class: 'row between' }, h('div', {}, h('a', { href: a.status === 'in_progress' ? '#/exam/' + a.examId : '#/results/' + a.id }, a.examTitle), h('div', { class: 'small muted' }, `Attempt ${a.attemptNumber} · ${fmtDate(ms(a.startedAt))}`)),
-        h('span', { class: 'chip ' + statusClass(a.status) }, a.status === 'in_progress' ? 'In progress' : `${fmtN(a.totalPoints)} pts`)))) : empty('No attempts yet', 'Start your first examination below.'))),
+        h('span', { class: 'chip ' + statusClass(a.status) }, a.status === 'in_progress' ? 'In progress' : a.pending ? 'Score pending' : `${fmtN(a.totalPoints)} pts`)))) : empty('No attempts yet', 'Start your first examination below.'))),
     h('h2', { style: { margin: '24px 0 12px' } }, 'Available examinations'), open.length ? h('div', { class: 'grid g2' }, open.map((e) => examCard(e, used(e.id)))) : empty('Nothing open right now', 'Check back soon.'),
     up.length ? [h('h2', { style: { margin: '24px 0 12px' } }, 'Upcoming'), h('div', { class: 'grid g2' }, up.map((e) => examCard(e, used(e.id))))] : null);
 }
@@ -53,7 +54,7 @@ export async function runner(v, { id }) {
   const err = h('div', { class: 'err', role: 'alert' });
   const start = h('button', { class: 'btn primary', onclick: async () => {
     start.disabled = true; err.textContent = '';
-    try { const { attemptId } = await fn('startAttempt', { examId: id }); const data = await fn('getAttempt', { attemptId }); if (data.status !== 'in_progress') return navigate('/results/' + attemptId); run(v, data); }
+    try { const { attemptId } = await startAttempt(id); const data = await getAttempt(attemptId); if (data.status !== 'in_progress') return navigate('/results/' + attemptId); run(v, data); }
     catch (x) { err.textContent = x.message; start.disabled = false; }
   } }, 'Start / resume');
   v.replaceChildren(h('section', { class: 'card stack runner' }, h('a', { href: '#/exams', class: 'small' }, 'Back'), h('h1', {}, e.title), h('p', {}, e.description),
@@ -63,7 +64,7 @@ export async function runner(v, { id }) {
 }
 
 function run(v, data) {
-  const Q = data.questions, S = { idx: 0, answers: { ...data.answers }, pending: new Map(), viewed: new Set(), offset: data.serverNow - Date.now(), finishing: false, flushing: false };
+  const Q = data.questions, S = { idx: 0, answers: { ...data.answers }, pending: new Map(), viewed: new Set(data.viewed || []), offset: data.serverNow - Date.now(), finishing: false, flushing: false };
   const flagKey = 'flags:' + data.id;
   const flags = new Set((() => { try { return JSON.parse(sessionStorage.getItem(flagKey) || '[]'); } catch { return []; } })());
   const saveFlags = () => { try { sessionStorage.setItem(flagKey, JSON.stringify([...flags])); } catch { /* ignore */ } };
@@ -79,8 +80,8 @@ function run(v, data) {
     try {
       while (S.pending.size) {
         const [qid, sel] = S.pending.entries().next().value;
-        try { await fn('attemptEvent', { attemptId: data.id, qid, type: 'answer', selected: sel }); if (S.pending.get(qid) === sel) S.pending.delete(qid); saveEl.textContent = 'Saved'; }
-        catch (x) { if (['failed-precondition', 'deadline-exceeded'].includes(x.code)) { S.pending.clear(); finish(true); return; } saveEl.textContent = 'Offline: retrying…'; await sleep(2000); }
+        try { await saveAnswer(data.id, qid, sel === null ? null : data.perm[qid][sel]); if (S.pending.get(qid) === sel) S.pending.delete(qid); saveEl.textContent = 'Saved'; }
+        catch (x) { if (x.code === 'permission-denied' && remaining() <= 3000) { S.pending.clear(); finish(true); return; } saveEl.textContent = x.code === 'permission-denied' ? 'Could not save this answer' : 'Offline: retrying…'; await sleep(2000); }
       }
     } finally { S.flushing = false; }
   }
@@ -88,7 +89,7 @@ function run(v, data) {
     if (S.finishing) return; S.finishing = true; clearInterval(iv);
     try {
       if (!timeUp) for (let i = 0; i < 15 && (S.pending.size || S.flushing); i++) await sleep(400);
-      let res; for (let t = 0; ; t++) { try { res = await fn('finalizeAttempt', { attemptId: data.id }); break; } catch (x) { if (t >= 3) throw x; await sleep(1500); } }
+      let res; for (let t = 0; ; t++) { try { res = await finalizeAttempt(data.id, S.offset); break; } catch (x) { if (t >= 3) throw x; await sleep(1500); } }
       if (timeUp) toast('Time is up. Your attempt was submitted.');
       navigate('/results/' + data.id);
     } catch (x) { S.finishing = false; toast(x.message + ' Press Submit to try again.', true); }
@@ -103,7 +104,7 @@ function run(v, data) {
   }
   function draw() {
     const q = Q[S.idx];
-    if (!S.viewed.has(q.id)) { S.viewed.add(q.id); fn('attemptEvent', { attemptId: data.id, qid: q.id, type: 'view' }).catch(() => {}); }
+    if (!S.viewed.has(q.id)) { S.viewed.add(q.id); recordView(data.id, q.id); }
     const n = Object.keys(S.answers).length; bar.style.width = `${(n / Q.length) * 100}%`;
     qArea.replaceChildren(h('div', { class: 'row between small muted' }, h('span', {}, `Question ${S.idx + 1} of ${Q.length}`), h('span', {}, `${q.points} base points`)),
       h('div', { class: 'qtext', id: 'qt' }, q.question),
@@ -122,11 +123,19 @@ function run(v, data) {
 
 // ===================== RESULTS =====================
 export async function results(v, { id }) {
-  const { attempt: a, review } = await fn('getResult', { attemptId: id });
+  const { attempt: a, review, pending } = await getResult(id);
+  if (pending) {
+    v.replaceChildren(head('Results', h('a', { class: 'btn', href: '#/history' }, 'History'), h('a', { class: 'btn primary', href: '#/exams' }, 'More examinations')),
+      h('section', { class: 'card stack' }, h('h2', { style: { margin: 0, overflowWrap: 'anywhere' } }, a.examTitle), h('span', { class: 'small muted' }, `Attempt ${a.attemptNumber} · ${USER_META[a.userId]?.name} · ${fmtDate(ms(a.startedAt))}`),
+        h('div', { class: 'row' }, h('span', { class: 'chip ' + statusClass(a.status) }, STATUS_LABEL[a.status])),
+        h('div', { class: 'grid g4' }, stat('Questions answered', a.answeredCount ?? '—', `of ${a.questionCount}`), stat('Time spent', fmtDur(a.elapsedSeconds))),
+        h('p', { class: 'alert info' }, 'Your answers are saved. Scores, correct answers and explanations are released once you have used all of your attempts for this examination or it has closed, so the key cannot help a later attempt.')));
+    return;
+  }
   const board = sortBoard(await loadSummaries()), pos = board.findIndex((s) => s.userId === a.userId) + 1;
   const passed = a.passingScore != null ? a.accuracy >= a.passingScore : null;
   v.replaceChildren(head('Results', h('a', { class: 'btn', href: '#/history' }, 'History'), h('a', { class: 'btn primary', href: '#/exams' }, 'More examinations')),
-    h('section', { class: 'card stack' }, h('div', { class: 'row between' }, h('div', {}, h('h2', { style: { margin: 0, overflowWrap: 'anywhere' } }, a.examTitle), h('span', { class: 'small muted' }, `Attempt ${a.attemptNumber} · ${USER_META[a.userId]?.name} · ${fmtDate(a.startedAt)}`)),
+    h('section', { class: 'card stack' }, h('div', { class: 'row between' }, h('div', {}, h('h2', { style: { margin: 0, overflowWrap: 'anywhere' } }, a.examTitle), h('span', { class: 'small muted' }, `Attempt ${a.attemptNumber} · ${USER_META[a.userId]?.name} · ${fmtDate(ms(a.startedAt))}`)),
       h('div', { class: 'row' }, h('span', { class: 'chip ' + statusClass(a.status) }, STATUS_LABEL[a.status]), passed != null && h('span', { class: 'chip ' + (passed ? 'ok' : 'bad') }, passed ? `Passed (${a.passingScore}% needed)` : `Not passed (${a.passingScore}% needed)`))),
       h('div', { class: 'grid g4' }, stat('Final score', fmtN(a.totalPoints), `of ${fmtN(a.maxBasePoints)} base + bonus`), stat('Base points', fmtN(a.basePoints)), stat('Speed bonus', '+' + fmtN(a.speedBonus)), stat('Accuracy', fmtPct(a.accuracy)),
         stat('Correct', a.correctCount), stat('Incorrect', a.incorrectCount), stat('Unanswered', a.unansweredCount), stat('Time spent', fmtDur(a.elapsedSeconds)), stat('Leaderboard position', pos ? '#' + pos : '—'))),
@@ -144,8 +153,8 @@ export async function history(v) {
   async function load() {
     more.disabled = true; const r = await loadAttempts(uid, { size: 15, after: cursor }); cursor = r.last; rows.push(...r.rows);
     for (const a of r.rows) body.append(h('tr', {}, h('td', { 'data-label': 'Examination', class: 'title-cell' }, a.examTitle), h('td', { 'data-label': 'Attempt' }, '#' + a.attemptNumber), h('td', { 'data-label': 'Started', class: 'nowrap' }, fmtDate(ms(a.startedAt))), h('td', { 'data-label': 'Duration' }, fmtDur(a.elapsedSeconds)),
-      h('td', { 'data-label': 'Correct / wrong / blank' }, a.status === 'in_progress' ? '—' : `${a.correctCount} / ${a.incorrectCount} / ${a.unansweredCount}`), h('td', { 'data-label': 'Accuracy' }, a.status === 'in_progress' ? '—' : fmtPct(a.accuracy)),
-      h('td', { 'data-label': 'Base + bonus' }, a.status === 'in_progress' ? '—' : `${fmtN(a.basePoints)} + ${fmtN(a.speedBonus)}`), h('td', { 'data-label': 'Score' }, h('strong', {}, a.status === 'in_progress' ? '—' : fmtN(a.totalPoints))),
+      h('td', { 'data-label': 'Correct / wrong / blank' }, (a.status === 'in_progress' || a.pending) ? '—' : `${a.correctCount} / ${a.incorrectCount} / ${a.unansweredCount}`), h('td', { 'data-label': 'Accuracy' }, (a.status === 'in_progress' || a.pending) ? '—' : fmtPct(a.accuracy)),
+      h('td', { 'data-label': 'Base + bonus' }, (a.status === 'in_progress' || a.pending) ? '—' : `${fmtN(a.basePoints)} + ${fmtN(a.speedBonus)}`), h('td', { 'data-label': 'Score' }, h('strong', {}, (a.status === 'in_progress' || a.pending) ? '—' : fmtN(a.totalPoints))),
       h('td', { 'data-label': 'Status' }, h('span', { class: 'chip ' + statusClass(a.status) }, STATUS_LABEL[a.status])), h('td', {}, h('a', { class: 'btn sm', href: a.status === 'in_progress' ? '#/exam/' + a.examId : '#/results/' + a.id }, a.status === 'in_progress' ? 'Resume' : 'Details'))));
     more.hidden = !r.more; more.disabled = false;
     const f = done(rows); // newest first
@@ -157,14 +166,7 @@ export async function history(v) {
 }
 
 // ===================== LEADERBOARD =====================
-async function aggregate(period) {
-  if (period === 'all') return loadSummaries();
-  const since = startOfPeriod(period), { Timestamp } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js');
-  const snap = await getDocs(query(collection(db, 'leaderboardEntries'), where('finalizedAt', '>=', Timestamp.fromMillis(since))));
-  const by = {};
-  snap.docs.forEach((d) => { const e = d.data(), s = (by[e.userId] ||= { userId: e.userId, totalPoints: 0, completedAttempts: 0, accSum: 0, bestScore: 0, totalCompletionSeconds: 0 }); s.totalPoints += e.points; s.completedAttempts++; s.accSum += e.accuracy; s.bestScore = Math.max(s.bestScore, e.points); s.totalCompletionSeconds += e.seconds; });
-  return Object.values(by).map((s) => ({ ...s, averageAccuracy: s.accSum / s.completedAttempts }));
-}
+async function aggregate(period) { return period === 'all' ? loadSummaries() : loadSummariesSince(startOfPeriod(period)); }
 export async function leaderboard(v) {
   let period = 'all'; const table = h('div'), seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Period' });
   async function draw() {
@@ -177,7 +179,7 @@ export async function leaderboard(v) {
         h('td', { 'data-label': 'User' }, h('a', { href: '#/user/' + s.userId, class: 'row', style: { textDecoration: 'none', color: 'inherit', flexWrap: 'nowrap' } }, avatar(s.userId, USER_META[s.userId].name, 34), h('strong', {}, USER_META[s.userId].name))),
         h('td', { 'data-label': 'Points' }, h('strong', {}, fmtN(s.totalPoints))), h('td', { 'data-label': 'Completed' }, fmtN(s.completedAttempts)), h('td', { 'data-label': 'Avg accuracy' }, s.completedAttempts ? fmtPct(s.averageAccuracy) : '—'),
         h('td', { 'data-label': 'Best score' }, fmtN(s.bestScore)), h('td', { 'data-label': 'Avg time' }, s.completedAttempts ? fmtDur(s.totalCompletionSeconds / s.completedAttempts) : '—')))))),
-      h('p', { class: 'small muted', style: { marginTop: '12px' } }, 'Ranked by total points from finalized attempts. Ties: higher average accuracy, then lower total completion time. Week starts Monday 00:00, month on the 1st, both in Asia/Amman time.'));
+      h('p', { class: 'small muted', style: { marginTop: '12px' } }, 'Ranked by total points from finalized attempts. Ties: higher average accuracy, then lower total completion time. Week starts Monday 00:00, month on the 1st, both in Asia/Amman time. Scores are recomputed from raw answers; attempts whose answer key has not been released to you yet are not counted.'));
   }
   v.replaceChildren(head('Leaderboard', seg), table); await draw();
 }
@@ -185,8 +187,8 @@ export async function leaderboard(v) {
 // Public profile: only the data the app deliberately shares (summary + per-attempt points/accuracy).
 export async function profile(v, { id }) {
   if (!USER_META[id]) return navigate('/leaderboard');
-  const [sums, entries] = await Promise.all([loadSummaries(), getDocs(query(collection(db, 'leaderboardEntries'), where('userId', '==', id), orderBy('finalizedAt', 'asc')))]);
-  const s = sums.find((x) => x.userId === id) || {}, rank = sortBoard(sums).findIndex((x) => x.userId === id) + 1, e = entries.docs.map((d) => d.data());
+  const { summaries: sums, entries: all } = await loadBoardData();
+  const s = sums.find((x) => x.userId === id) || {}, rank = sortBoard(sums).findIndex((x) => x.userId === id) + 1, e = all.filter((x) => x.userId === id);
   v.replaceChildren(head(USER_META[id].name, h('a', { class: 'btn', href: '#/leaderboard' }, 'Leaderboard')), h('div', { class: 'row', style: { marginBottom: '16px' } }, avatar(id, USER_META[id].name, 56), h('span', { class: 'chip' }, 'Shared statistics')),
     h('div', { class: 'grid g4' }, stat('Total points', fmtN(s.totalPoints)), stat('Rank', rank && s.totalPoints != null ? '#' + rank : '—'), stat('Completed exams', fmtN(s.completedAttempts)), stat('Total attempts', fmtN(s.attemptsStarted)), stat('Average accuracy', fmtPct(s.averageAccuracy)), stat('Best score', fmtN(s.bestScore))),
     h('div', { class: 'grid g2', style: { marginTop: '16px' } }, h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.points })), { title: 'Points per examination', bar: true })), h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.accuracy })), { title: 'Accuracy progression (%)', unit: '%' }))));

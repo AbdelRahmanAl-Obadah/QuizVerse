@@ -1,5 +1,4 @@
-// Shared exam validation. Pure ES module: used by Cloud Functions (authoritative) and
-// copied to public/js/validation.js for instant client-side feedback. Never trust the client copy.
+// Exam validation. Pure ES module, used by the admin editor/importer. Server-side enforcement is Firestore Security Rules.
 export const LIMITS = { maxChars: 400000, maxQuestions: 200 };
 export const DIFFICULTIES = ['easy', 'medium', 'hard'];
 export const DEFAULT_POINTS = { easy: 100, medium: 200, hard: 300 };

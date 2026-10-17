@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { speedBonus, scoreAttempt, questionBudget } from '../lib/scoring.js';
-import { parseExamJson, validateExam } from '../lib/validation.js';
+import { speedBonus, scoreAttempt, questionBudget } from '../public/js/scoring.js';
+import { parseExamJson, validateExam } from '../public/js/validation.js';
 
 test('speed bonus formula and edge cases', () => {
   assert.equal(speedBonus(100, 0, 60), 25);
@@ -38,4 +38,17 @@ test('validation accepts the sample and rejects bad input', () => {
   assert.equal(bad((o) => { o.schemaVersion = 2; return o; }), false);
   assert.equal(bad((o) => { o.closingAt = '2026-01-01T00:00:00Z'; o.openingAt = '2026-02-01T00:00:00Z'; return o; }), false);
   assert.equal(parseExamJson('{nope').ok, false);
+});
+
+// ---- delayed-reveal scoring is recomputed from raw server-timestamped data ----
+test('scoring: answers after the deadline and unanswered score zero; elapsed is measured from first view', () => {
+  const r = scoreAttempt({ order: ['a', 'b', 'c'], questions, keys, startedAtMs: 0, deadlineMs: 600000, durationSeconds: 600,
+    answers: { a: { s: 1, t: 30000 }, b: { s: 2, t: 600001 } }, views: { a: 20000 } });
+  assert.equal(r.items[0].isCorrect, true); assert.equal(r.items[0].elapsedSeconds, 10);
+  assert.equal(r.items[1].isCorrect, false); assert.equal(r.unansweredCount, 2); // late b + never-answered c
+  assert.equal(r.speedBonus, Math.floor(100 * 0.25 * (1 - 10 / 200))); // budget = 600/3 = 200 s
+});
+test('scoring: a view earlier than the attempt start cannot create a bonus advantage', () => {
+  const r = scoreAttempt({ order: ['a'], questions, keys, startedAtMs: 100000, deadlineMs: 700000, durationSeconds: 600, answers: { a: { s: 1, t: 100000 } }, views: { a: -999999 } });
+  assert.equal(r.items[0].elapsedSeconds, 0);
 });

@@ -1,6 +1,5 @@
 {
   "firestore": { "rules": "firestore.rules", "indexes": "firestore.indexes.json" },
-  "functions": [{ "source": "functions", "codebase": "default", "ignore": ["node_modules", ".env.example", "test"] }],
   "hosting": {
     "public": "public",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
@@ -9,12 +8,12 @@
       "headers": [
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.cloudfunctions.net https://*.run.app; frame-ancestors 'none'; base-uri 'none'" }
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://www.gstatic.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.googleapis.com; frame-ancestors 'none'; base-uri 'none'" }
       ]
     }]
   },
   "emulators": {
-    "auth": { "port": 9099 }, "functions": { "port": 5001 }, "firestore": { "port": 8080 },
+    "auth": { "port": 9099 }, "firestore": { "port": 8080 },
     "hosting": { "port": 5000 }, "ui": { "enabled": true }
   }
 }

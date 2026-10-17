@@ -1,4 +1,6 @@
-import { auth, db, configured, onAuthStateChanged, signOut, doc, getDoc } from './api.js';
+import { auth, configured, onAuthStateChanged, signOut } from './api.js';
+import { touchProfile, finalizeExpiredFor, adminFinalizeAllExpired, clearScoreCache, resetSession } from './services.js';
+import { USER_META, clearBoardCache } from './data.js';
 import { state, runCleanups, navigate } from './state.js';
 import { h, icon, spinner, avatar, toast } from './ui.js';
 import { renderLogin } from './views-auth.js';
@@ -44,7 +46,7 @@ function errorBox(e) { return h('div', { class: 'card stack' }, h('h2', {}, 'Som
 
 let token = 0;
 async function route() {
-  runCleanups();
+  runCleanups(); clearScoreCache(); clearBoardCache();
   if (!state.user) { shell = null; document.body.classList.remove('focus'); return renderLogin(root); }
   const path = location.hash.slice(1) || '/dashboard';
   const r = routes.find((x) => x.re.test(path));
@@ -60,14 +62,17 @@ window.addEventListener('hashchange', route);
 window.addEventListener('unhandledrejection', (e) => toast(e.reason?.message || 'Unexpected error', true));
 
 if (!configured) {
-  root.replaceChildren(h('main', { class: 'auth' }, h('div', { class: 'card panel stack' }, h('h1', {}, 'Firebase is not configured'), h('p', {}, 'Open public/js/firebase-config.js and paste your Firebase web app configuration. See README.md, step 4.'))));
+  root.replaceChildren(h('main', { class: 'auth' }, h('div', { class: 'card panel stack' }, h('h1', {}, 'Firebase is not configured'), h('p', {}, 'Open public/js/firebase-config.js and paste your Firebase web app configuration. See README.md.'))));
 } else {
   onAuthStateChanged(auth, async (u) => {
-    state.user = null;
-    if (u) {
-      try { const d = (await getDoc(doc(db, 'users', u.uid))).data(); state.user = { id: u.uid, name: d.displayName, role: d.role }; }
-      catch { await signOut(auth); toast('Could not load your profile. Please sign in again.', true); }
-    }
+    state.user = null; resetSession(); clearBoardCache();
+    const handle = u?.email?.split('@')[0];
+    if (u && USER_META[handle]) {
+      // UI-only convenience. Authorization is enforced by Firestore Security Rules, never by this object.
+      state.user = { id: handle, name: USER_META[handle].name, role: handle === 'abood' ? 'admin' : 'user' };
+      await touchProfile();
+      await (handle === 'abood' ? adminFinalizeAllExpired() : finalizeExpiredFor(handle)); // lazy replacement for the old sweeper
+    } else if (u) { await signOut(auth); toast('This account is not part of QuizVerse.', true); }
     shell = null; route();
   });
 }

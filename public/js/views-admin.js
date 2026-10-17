@@ -1,4 +1,5 @@
-import { db, fn, collection, doc, getDocs, query, where, orderBy, limit, startAfter, getCountFromServer } from './api.js';
+import * as S from './services.js';
+import { db, collection, doc, getDocs, query, where, orderBy, limit, startAfter, getCountFromServer } from './api.js';
 import { state, navigate } from './state.js';
 import { h, empty, loading, modal, confirmDialog, toast, busy, copyText, download, fmtDate, fmtN, fmtPct, fmtDur, toInputDT, fromInputDT, avatar } from './ui.js';
 import { ms, USER_META, STATUS_LABEL, statusClass, loadSummaries, loadAttempts, availability } from './data.js';
@@ -19,18 +20,19 @@ export async function overview(v) {
     count(collection(db, 'users')), count(E), count(query(E, where('publicationStatus', '==', 'published'))),
     count(query(E, where('publicationStatus', '==', 'published'), where('openingAt', '>', Timestamp.fromMillis(now)))),
     count(A), count(query(A, where('status', 'in', ['submitted', 'timed_out']))), loadSummaries(),
-    getDocs(query(E, orderBy('attemptCount', 'desc'), limit(5))), getDocs(query(collection(db, 'activityLogs'), orderBy('timestamp', 'desc'), limit(10))),
+    getDocs(query(A, orderBy('startedAt', 'desc'), limit(300))), getDocs(query(collection(db, 'activityLogs'), orderBy('timestamp', 'desc'), limit(10))),
   ]);
   const n = sums.reduce((t, s) => t + (s.completedAttempts || 0), 0), acc = n ? sums.reduce((t, s) => t + (s.accuracySum || 0), 0) / n : null;
+  const tally = {}; top.docs.forEach((d) => { const t = d.data().examTitle; tally[t] = (tally[t] || 0) + 1; }); const topList = Object.entries(tally).sort((a, b) => b[1] - a[1]).slice(0, 5);
   v.replaceChildren(head('Administration'), h('div', { class: 'grid g4' }, stat('Registered users', users), stat('Examinations', exams), stat('Published', pub), stat('Upcoming', up), stat('Total attempts', att), stat('Completed attempts', comp), stat('Average accuracy', fmtPct(acc))),
     h('div', { class: 'grid g2', style: { marginTop: '16px' } },
-      h('div', { class: 'card' }, h('h2', {}, 'Most attempted'), top.docs.filter((d) => d.data().attemptCount > 0).length ? top.docs.filter((d) => d.data().attemptCount > 0).map((d) => h('div', { class: 'row between', style: { padding: '6px 0' } }, h('span', { style: { overflowWrap: 'anywhere' } }, d.data().title), h('span', { class: 'chip' }, d.data().attemptCount))) : empty('No attempts yet')),
+      h('div', { class: 'card' }, h('h2', {}, 'Most attempted (last 300 attempts)'), topList.length ? topList.map(([t, c]) => h('div', { class: 'row between', style: { padding: '6px 0' } }, h('span', { style: { overflowWrap: 'anywhere' } }, t), h('span', { class: 'chip' }, c))) : empty('No attempts yet')),
       h('div', { class: 'card' }, h('h2', {}, 'Recent activity'), logs.docs.length ? logs.docs.map((d) => { const l = d.data(); return h('div', { class: 'small', style: { padding: '5px 0' } }, h('strong', {}, USER_META[l.actorUserId]?.name || l.actorUserId), ' · ', l.action.replaceAll('_', ' '), h('span', { class: 'muted' }, ' · ' + tsDate(l.timestamp))); }) : empty('No activity yet'))));
 }
 
 // ===================== EXAM MANAGEMENT =====================
 async function previewExam(id) {
-  const { exam } = await fn('adminGetExam', { examId: id });
+  const { exam } = await S.adminGetExam({ examId: id });
   modal(h('div', { class: 'modal-body wide' }, h('h2', {}, 'Preview: ' + exam.title), examPreview(exam), h('div', { class: 'row end', style: { marginTop: '12px' } }, h('button', { class: 'btn', onclick: (e) => e.target.closest('dialog').close() }, 'Close'))), 'Exam preview');
 }
 function examPreview(e) {
@@ -49,16 +51,16 @@ export async function exams(v) {
       (st.value === 'all' || (st.value === 'draft' ? e.publicationStatus === 'draft' : e.publicationStatus === 'published' && (st.value === 'published' || availability(e) === st.value))));
     body.replaceChildren(...(list.length ? list.map((e) => { const pub = e.publicationStatus === 'published';
       return h('tr', {}, td('Title', h('div', { class: 'title-cell' }, h('strong', {}, e.title))), td('Subject', e.category), td('Difficulty', h('span', { class: 'chip' }, e.difficulty)), td('Questions', e.questionCount), td('Duration', e.durationMinutes + ' min'), td('Attempt limit', e.maxAttempts),
-        td('Status', h('span', { class: 'chip ' + (pub ? 'ok' : '') }, pub ? 'Published' : 'Draft')), td('Opens', h('span', { class: 'nowrap' }, e.openingAt ? tsDate(e.openingAt) : 'Immediately')), td('Closes', h('span', { class: 'nowrap' }, e.closingAt ? tsDate(e.closingAt) : 'Never')), td('Attempts', e.attemptCount || 0),
+        td('Status', h('span', { class: 'chip ' + (pub ? 'ok' : '') }, pub ? 'Published' : 'Draft')), td('Opens', h('span', { class: 'nowrap' }, e.openingAt ? tsDate(e.openingAt) : 'Immediately')), td('Closes', h('span', { class: 'nowrap' }, e.closingAt ? tsDate(e.closingAt) : 'Never')),
         td('Actions', h('div', { class: 'row', style: { gap: '6px' } }, act('Preview', () => previewExam(e.id)), h('a', { class: 'btn sm', href: '#/admin/exams/edit/' + e.id }, 'Edit'),
-          act(pub ? 'Unpublish' : 'Publish', async () => { if (pub && !(await confirmDialog({ title: 'Unpublish examination?', message: 'Users will no longer see it. Finished attempts stay.', confirmText: 'Unpublish' }))) return; await fn('adminSetStatus', { examId: e.id, status: pub ? 'draft' : 'published' }); toast(pub ? 'Unpublished' : 'Published'); reload(); }),
-          act('Duplicate', async () => { await fn('adminDuplicateExam', { examId: e.id }); toast('Duplicated as draft'); reload(); }),
-          act('Delete', async () => { if (await confirmDialog({ title: 'Delete examination?', message: `"${e.title}" and its questions will be permanently deleted. This only works when it has no attempts.`, confirmText: 'Delete', danger: true })) { await fn('adminDeleteExam', { examId: e.id }); toast('Deleted'); reload(); } }, 'danger'))));
-    }) : [h('tr', {}, h('td', { colspan: 11 }, empty('No examinations match', 'Create one or import JSON.')))]));
+          act(pub ? 'Unpublish' : 'Publish', async () => { if (pub && !(await confirmDialog({ title: 'Unpublish examination?', message: 'Users will no longer see it. Finished attempts stay.', confirmText: 'Unpublish' }))) return; await S.adminSetStatus({ examId: e.id, status: pub ? 'draft' : 'published' }); toast(pub ? 'Unpublished' : 'Published'); reload(); }),
+          act('Duplicate', async () => { await S.adminDuplicateExam({ examId: e.id }); toast('Duplicated as draft'); reload(); }),
+          act('Delete', async () => { if (await confirmDialog({ title: 'Delete examination?', message: `"${e.title}" and its questions will be permanently deleted. This only works when it has no attempts.`, confirmText: 'Delete', danger: true })) { await S.adminDeleteExam({ examId: e.id }); toast('Deleted'); reload(); } }, 'danger'))));
+    }) : [h('tr', {}, h('td', { colspan: 10 }, empty('No examinations match', 'Create one or import JSON.')))]));
   }
   [q, st, df].forEach((x) => x.addEventListener('input', draw)); draw();
   v.replaceChildren(head('Examinations', h('a', { class: 'btn', href: '#/admin/import' }, 'Import JSON'), h('a', { class: 'btn primary', href: '#/admin/exams/edit/new' }, 'Create examination')),
-    h('div', { class: 'grid g4', style: { marginBottom: '12px' } }, q, st, df), h('div', { class: 'table-wrap' }, h('table', { class: 'stack-sm' }, th(['Title', 'Subject', 'Difficulty', 'Questions', 'Duration', 'Attempt limit', 'Status', 'Opens', 'Closes', 'Attempts', 'Actions']), body)));
+    h('div', { class: 'grid g4', style: { marginBottom: '12px' } }, q, st, df), h('div', { class: 'table-wrap' }, h('table', { class: 'stack-sm' }, th(['Title', 'Subject', 'Difficulty', 'Questions', 'Duration', 'Attempt limit', 'Status', 'Opens', 'Closes', 'Actions']), body)));
 }
 
 // ===================== EDITOR (create / edit / edit-after-import) =====================
@@ -66,7 +68,7 @@ const blank = () => ({ schemaVersion: 1, title: '', description: '', category: '
 const newQ = (n) => ({ id: 'q' + n, question: '', options: ['', '', '', ''], correctAnswer: 0, difficulty: 'easy', points: 100, explanation: '', timeBudgetSeconds: null });
 export async function editor(v, { id }) {
   let E, examId = id === 'new' ? null : id;
-  if (!examId) { E = state.draft || blank(); state.draft = null; } else E = (await fn('adminGetExam', { examId })).exam;
+  if (!examId) { E = state.draft || blank(); state.draft = null; } else E = (await S.adminGetExam({ examId })).exam;
   const err = h('div', { role: 'alert' }), qBox = h('div', { class: 'stack' });
   const f = (label, key, o = {}) => { const i = h(o.area ? 'textarea' : 'input', { type: o.type || 'text', id: 'f-' + key, ...(o.area ? {} : { value: o.val ?? E[key] ?? '' }), min: o.min, max: o.max }); if (o.area) i.textContent = E[key] ?? '';
     i.addEventListener('input', () => { E[key] = o.set ? o.set(i.value) : o.type === 'number' ? (i.value === '' ? null : Number(i.value)) : i.value; }); return h('div', { class: 'field' }, h('label', { for: 'f-' + key }, label), i); };
@@ -88,7 +90,7 @@ export async function editor(v, { id }) {
   const open = h('input', { type: 'datetime-local', id: 'f-open', value: toInputDT(E.openingAt ? Date.parse(E.openingAt) : null) }), close = h('input', { type: 'datetime-local', id: 'f-close', value: toInputDT(E.closingAt ? Date.parse(E.closingAt) : null) });
   open.addEventListener('input', () => { const m = fromInputDT(open.value); E.openingAt = m ? new Date(m).toISOString() : null; }); close.addEventListener('input', () => { const m = fromInputDT(close.value); E.closingAt = m ? new Date(m).toISOString() : null; });
   const collect = () => { const r = validateExam({ ...E, tags: Array.isArray(E.tags) ? E.tags : [] }); err.replaceChildren(...(r.ok ? [] : [h('div', { class: 'alert' }, h('strong', {}, 'Fix these before saving:'), h('ul', {}, r.errors.map((x) => h('li', {}, x))))])); if (!r.ok) err.scrollIntoView({ block: 'center' }); return r; };
-  const save = h('button', { class: 'btn primary', onclick: () => busy(save, async () => { const r = collect(); if (!r.ok) return; const res = await fn('adminSaveExam', { examId, exam: r.exam }); examId = res.examId; toast('Saved'); navigate('/admin/exams'); }) }, 'Save examination');
+  const save = h('button', { class: 'btn primary', onclick: () => busy(save, async () => { const r = collect(); if (!r.ok) return; const res = await S.adminSaveExam({ examId, exam: r.exam }); examId = res.examId; toast('Saved'); navigate('/admin/exams'); }) }, 'Save examination');
   const prev = h('button', { class: 'btn', onclick: () => { const r = collect(); if (r.ok) modal(h('div', { class: 'modal-body wide' }, h('h2', {}, 'Preview'), examPreview(r.exam), h('div', { class: 'row end' }, h('button', { class: 'btn', onclick: (e) => e.target.closest('dialog').close() }, 'Close'))), 'Preview'); } }, 'Preview');
   drawQs();
   v.replaceChildren(head(examId ? 'Edit examination' : 'Create examination', prev, save), h('p', { class: 'small muted' }, 'Dates use Asia/Amman time. New examinations are saved as drafts; publish them from the list.'),
@@ -117,7 +119,7 @@ export function importer(v) {
   const check = h('button', { class: 'btn primary', onclick: () => {
     const r = parseExamJson(ta.value);
     if (!r.ok) { out.replaceChildren(h('div', { class: 'alert' }, h('strong', {}, `${r.errors.length} problem${r.errors.length > 1 ? 's' : ''} found. Nothing was imported.`), h('ul', {}, r.errors.map((x) => h('li', {}, x))))); return; }
-    const imp = h('button', { class: 'btn primary', onclick: () => busy(imp, async () => { await fn('adminSaveExam', { exam: r.exam, source: 'import' }); toast('Imported as draft'); navigate('/admin/exams'); }) }, 'Import as draft');
+    const imp = h('button', { class: 'btn primary', onclick: () => busy(imp, async () => { await S.adminSaveExam({ exam: r.exam, source: 'import' }); toast('Imported as draft'); navigate('/admin/exams'); }) }, 'Import as draft');
     out.replaceChildren(h('div', { class: 'alert info' }, `Valid: ${r.exam.questions.length} questions. Review the correct answers below, then import.`), h('div', { class: 'card' }, h('h2', {}, r.exam.title), examPreview(r.exam)),
       h('div', { class: 'row end' }, h('button', { class: 'btn', onclick: () => { state.draft = r.exam; navigate('/admin/exams/edit/new'); } }, 'Edit questions first'), imp));
   } }, 'Validate and preview');
@@ -132,19 +134,19 @@ export async function users(v) {
   const S = Object.fromEntries(sums.map((s) => [s.userId, s])), U = Object.fromEntries(snap.docs.map((d) => [d.id, d.data()]));
   v.replaceChildren(head('Users'), h('div', { class: 'table-wrap' }, h('table', { class: 'stack-sm' }, th(['Name', 'Role', 'Attempts', 'Completed', 'Total points', 'Avg accuracy', 'Avg time', 'Last activity', '']),
     h('tbody', {}, Object.entries(USER_META).map(([id, m]) => { const s = S[id] || {}, u = U[id];
-      return h('tr', {}, td('Name', h('div', { class: 'row', style: { flexWrap: 'nowrap' } }, avatar(id, m.name, 32), h('strong', {}, m.name), !u && h('span', { class: 'chip warn' }, 'PIN not set'))), td('Role', h('span', { class: 'chip ' + (m.role === 'admin' ? 'acc' : '') }, m.role)), td('Attempts', fmtN(s.attemptsStarted)), td('Completed', fmtN(s.completedAttempts)),
+      return h('tr', {}, td('Name', h('div', { class: 'row', style: { flexWrap: 'nowrap' } }, avatar(id, m.name, 32), h('strong', {}, m.name), !u && h('span', { class: 'chip warn' }, 'Never signed in'))), td('Role', h('span', { class: 'chip ' + (m.role === 'admin' ? 'acc' : '') }, m.role)), td('Attempts', fmtN(s.attemptsStarted)), td('Completed', fmtN(s.completedAttempts)),
         td('Points', fmtN(s.totalPoints)), td('Avg accuracy', s.completedAttempts ? fmtPct(s.averageAccuracy) : '—'), td('Avg time', s.completedAttempts ? fmtDur(s.totalCompletionSeconds / s.completedAttempts) : '—'), td('Last activity', h('span', { class: 'nowrap' }, u?.lastActivityAt ? tsDate(u.lastActivityAt) : '—')),
         td('', h('a', { class: 'btn sm', href: '#/admin/attempts' }, 'Attempts'))); })))));
 }
 export async function attempts(v) {
-  let cursor = null; const body = h('tbody'), more = h('button', { class: 'btn', onclick: () => load(false) }, 'Load more');
+  await S.adminFinalizeAllExpired(); let cursor = null; const body = h('tbody'), more = h('button', { class: 'btn', onclick: () => load(false) }, 'Load more');
   const uSel = h('select', { 'aria-label': 'User' }, h('option', { value: '' }, 'All users'), Object.entries(USER_META).map(([id, m]) => h('option', { value: id }, m.name)));
   const sSel = h('select', { 'aria-label': 'Status' }, h('option', { value: '' }, 'All statuses'), Object.entries(STATUS_LABEL).map(([k, t]) => h('option', { value: k }, t)));
   async function load(reset) {
     if (reset) { cursor = null; body.replaceChildren(); } more.disabled = true;
     try { const r = await loadAttempts(uSel.value || null, { size: 20, after: cursor, status: sSel.value || null }); cursor = r.last;
       r.rows.forEach((a) => body.append(h('tr', {}, td('User', USER_META[a.userId]?.name), td('Examination', h('div', { class: 'title-cell' }, a.examTitle)), td('Attempt', '#' + a.attemptNumber), td('Started', h('span', { class: 'nowrap' }, tsDate(a.startedAt))), td('Status', h('span', { class: 'chip ' + statusClass(a.status) }, STATUS_LABEL[a.status])),
-        td('Score', a.status === 'in_progress' ? '—' : fmtN(a.totalPoints)), td('Accuracy', a.status === 'in_progress' ? '—' : fmtPct(a.accuracy)), td('', a.status === 'in_progress' ? '' : h('a', { class: 'btn sm', href: '#/results/' + a.id }, 'Details')))));
+        td('Score', (a.status === 'in_progress' || a.pending) ? '—' : fmtN(a.totalPoints)), td('Accuracy', (a.status === 'in_progress' || a.pending) ? '—' : fmtPct(a.accuracy)), td('', a.status === 'in_progress' ? '' : h('a', { class: 'btn sm', href: '#/results/' + a.id }, 'Details')))));
       if (reset && !r.rows.length) body.append(h('tr', {}, h('td', { colspan: 8 }, empty('No attempts match')))); more.hidden = !r.more; } catch (e) { toast(e.message, true); } more.disabled = false;
   }
   [uSel, sSel].forEach((x) => x.addEventListener('change', () => load(true)));
@@ -152,7 +154,7 @@ export async function attempts(v) {
 }
 
 // ===================== ACTIVITY LOGS =====================
-const ACTIONS = ['login_success', 'login_failed', 'pin_setup', 'exam_started', 'answer_submitted', 'exam_completed', 'exam_timed_out', 'exam_abandoned', 'exam_created', 'exam_imported', 'exam_edited', 'exam_published', 'exam_unpublished', 'exam_duplicated', 'exam_deleted'];
+const ACTIONS = ['login_success', 'exam_started', 'exam_completed', 'exam_timed_out', 'exam_created', 'exam_imported', 'exam_edited', 'exam_published', 'exam_unpublished', 'exam_duplicated', 'exam_deleted'];
 export async function logs(v) {
   const exSnap = await getDocs(query(collection(db, 'exams'), orderBy('updatedAt', 'desc')));
   const uSel = h('select', { 'aria-label': 'User' }, h('option', { value: '' }, 'All users'), Object.entries(USER_META).map(([id, m]) => h('option', { value: id }, m.name)));

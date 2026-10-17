@@ -1,75 +1,73 @@
-# QuizVerse — private multiplayer quiz platform
+# QuizVerse — private multiplayer quiz platform (no Cloud Functions)
 
-Vanilla JS (ES modules) + Firebase (Auth, Firestore, Cloud Functions, Hosting). Four fixed users: **Abood** (admin), **Loge**, **Jana**, **Kinda**.
+Vanilla JS (ES modules) + **Firebase Authentication (email/password), Cloud Firestore + Security Rules, Firebase Hosting**.
+No Cloud Functions, Cloud Run, Express or any other backend. Four fixed accounts: **Abood** (admin), **Loge**, **Jana**, **Kinda**.
+Firebase project: `abood-cv`.
 
-## 1. Architecture and PIN-authentication security
-
-**Why a backend is required.** Firestore rules cannot hash or compare a PIN, and a PIN check in browser JavaScript is not authorization. So a Cloud Function (`loginWithPin`) verifies PINs and issues a Firebase **custom token** whose uid is the user id (`abood`, `loge`, …). Firestore rules then trust only `request.auth`.
+## 1. Architecture
 
 | Concern | Design |
 |---|---|
-| PIN storage | scrypt hash + random salt (+ optional `PIN_PEPPER`) in `pinSecrets/{user}`; rules deny all client access. Never logged. |
-| Brute force | 10,000 possible PINs is weak, so: 5 wrong PINs → 15-minute lock per user, logged. **A 4-digit PIN still offers limited security**; treat this as a private-family app, not a bank. |
-| First-time setup | Whoever sets a name's PIN first owns it. Set `SETUP_CODE` (functions/.env) and share it only with the four people, or set all four PINs yourself first. Without it, anyone who finds the site can claim an unclaimed name. |
-| Roles | Hard-coded in the function (`abood` = admin). Users cannot register names, and no client can write the `users` collection. |
-| Writes | **Clients cannot write anything.** Exams, attempts, scores, leaderboard, logs are all written by functions (Admin SDK). |
-| Answer keys | `examKeys/{id}` is unreadable by every client (even Abood); only functions read it. Questions reach users through `startAttempt`/`getAttempt`, answers are never sent. Abood edits via `adminGetExam`. |
-| Timing | Deadline = min(start + duration, closingAt), stored server-side; refresh rebuilds the timer from `deadlineAt`. Answer timestamps are server time. |
-| Attempt limits | `startAttempt` transaction on a lock doc `attemptLocks/{user}_{exam}` (count + single active attempt) so double clicks/tabs cannot exceed the limit. |
-| Finalization | One transaction; already-finalized attempts return immediately, so points are never awarded twice. Sweeper (`sweepExpired`, every 15 min) finalizes abandoned tabs. |
+| Identity | Firebase Auth email/password. Accounts are `abood@quizverse.app`, `loge@…`, `jana@…`, `kinda@…` (synthetic, never emailed). The handle is the part before `@`. |
+| "PIN" | The Firebase password. **Firebase requires ≥ 6 characters, so the PIN is now 6 digits.** Brute-force protection is Firebase Auth's built-in throttling (not configurable); the old 5-tries/15-min lock and the setup code no longer exist. |
+| Roles | `abood` is admin **inside `firestore.rules`** (by verified email). No role is read from a document, from localStorage or from the UI. The `role` in the UI state is cosmetic. |
+| Sign-up | Disable sign-up in the console (section 4) so nobody can create other accounts. |
+| Exams | Admin writes `exams`, `examQuestions` (no keys), `examKeys` (keys + explanations). Rules allow writes to admin only and validate the exam shape. |
+| Attempts | `attempts/{handle}_{examId}_{n}` + `attemptLocks/{handle}_{examId}` created together in one batch. Rules enforce: published and open, attempt number = previous + 1, ≤ `maxAttempts`, one active attempt, `startedAt` = server time, duration/closing time copied from the exam. |
+| Answers | `attempts/{id}/qs/{questionId}`: `{v: firstShown}` and `{selected, t}`. `t`/`v` must equal the **server timestamp**; writes are rejected after the deadline (`min(startedAt + duration, closingAt)`). Clients cannot store correctness, points or bonuses: no such fields are accepted. |
+| Finalization | Owner submits (server time must be before the deadline) or anyone allowed closes an expired attempt at exactly its deadline. Status, time fields and lock release are validated together. |
+| **Delayed reveal** | `examKeys` and (after the attempt ends) `examQuestions` are readable by a user **only** when the exam is published and either (a) the exam's `closingAt` has passed or (b) the user has used all `maxAttempts` and has no active attempt. Questions are also readable while the user has a live attempt. Until then results show "answers saved, score pending". |
+| Scoring | **Not stored.** After reveal each client recomputes scores from the protected raw data (`public/js/scoring.js`: base points + `floor(base × 0.25 × max(0, 1 − elapsed/budget))` speed bonus, accuracy). Leaderboard/history/profile are computed the same way. Others' attempts only count for a viewer once the key is revealed to that viewer. |
+| Expired attempts | `sweepExpired` is gone. Expired attempts are finalized lazily: when their owner signs in/starts/opens them, and for everyone when Abood signs in or opens *All attempts*. Until then they show as in progress and the exam key stays locked for that user. |
+| Audit log | `activityLogs` is written by clients with enforced attribution (`actorUserId` = caller, server timestamp, action allow-list, admin actions admin-only), read by admin only. |
 
-Private app vs. private network: Hosting files are public downloads; privacy comes from the PIN/backend/rules, not from hiding the URL. For network-level privacy you would need IAP/VPN/Cloudflare Access in front.
+Data model: `users` · `exams` (incl. `questionIds`) · `examQuestions` · `examKeys` · `attemptLocks` · `attempts` (+ `qs` subcollection) · `activityLogs`. Removed: `pinSecrets`, `leaderboardSummaries`, `leaderboardEntries`.
 
-## 2. Scoring (server only, `functions/lib/scoring.js`)
-- Base: points on each question (defaults easy 100 / medium 200 / hard 300).
-- `speedBonus = floor(base × 0.25 × max(0, 1 − elapsed / budget))`, never above base. Only for correct answers.
-- `elapsed` = server time of the answer − max(first time that question was shown, attempt start). `budget` = question `timeBudgetSeconds`, else `floor(duration / questionCount)` (min 5 s). Negative/invalid elapsed → bonus 0. Answers received after the deadline are ignored.
-- Accuracy = correct / total questions. Breakdown per question is stored in the attempt (`scoring`).
-- Status: `submitted`, `timed_out` (deadline reached, ≥1 answer), `abandoned` (deadline reached, no answers; not counted as completed or ranked).
+## 2. What is and is not guaranteed without a backend
 
-## 3. Data model
-`users` (profile/role, read-only to clients) · `exams` (metadata, status, `attemptCount`) · `examQuestions` (question text, no keys) · `examKeys` (keys, server only) · `attempts` (answers, deadline, result + `scoring`) · `attemptLocks` (server only) · `leaderboardSummaries/{user}` (all-time totals, updated in the finalize transaction) · `leaderboardEntries/{attempt}` (one small public row per completed attempt, used for week/month filters and public charts) · `activityLogs` (admin read only) · `pinSecrets` (server only).
-Denormalized aggregates (`leaderboardSummaries`, `attemptCount`) change only inside the same transactions that create/finalize attempts.
+**Enforced by Firestore Rules (server-side):** authentication; only the four accounts; admin-only exam writes; unpublished exams hidden; answer keys hidden until the reveal condition; question text hidden until an attempt is live; attempt ownership; attempt count and single active attempt; server-timestamped answers; no writes after the deadline; no client-supplied scores/correctness/bonus/time; no self-granted admin; immutable first-view time; no deletes of attempts/answers/logs.
 
-**Privacy setting.** Public to all four users: leaderboard summary + per-attempt points/accuracy/time (`leaderboardEntries`). Private: attempt details, answers, review (own + admin). To make detailed results public you would loosen the `attempts` rule; it is deliberately not exposed by default. Note an attempt's stored `scoring` shows which questions were right, visible to its owner after finalization even if "show correct answers" is off (the actual key is never sent).
+**NOT guaranteed (cannot be done without trusted server code):**
+- **Scores are not authoritative.** They are recomputed by each viewer's browser from protected data. A tampered browser can display wrong numbers *to itself* but cannot change anyone else's data, and every viewer recomputes independently.
+- **Speed bonus is gameable.** The "first shown" time `v` is written by the client; a user can delay it. Treat the (≤ 25%) bonus as best-effort. Correctness cannot be gamed.
+- **Answer reuse in multi-attempt exams is prevented only by delayed reveal**, which is why scores for exams with several attempts appear after the last attempt (or at closing). A user still remembers questions between attempts.
+- **PIN strength.** Firebase throttles guessing, but a 6-digit PIN is weak against a determined attacker. Treat this as a private family app; consider longer passwords (see section 4).
+- **Collusion.** Once you have used all attempts you may read other users' finalized raw answers for that exam.
+- **Admin is fully trusted** (can read keys, edit exams after attempts, change `maxAttempts`/`closingAt`, which can re-open or leak the key).
+- **Audit log** entries by a user about themselves can be forged (e.g. a fake `exam_completed`); they are advisory.
+- **Rules cannot enforce "no questions before open" for an already-started attempt, rate limits, or per-request IP limits.** Enable Firebase App Check if you need more.
+- Editing an exam's questions after attempts changes how stored answers re-score.
 
-## 4. Setup
-Prerequisites: Node 20+, `npm i -g firebase-tools`, a Google account. **Cloud Functions require the Blaze (pay-as-you-go) plan**; a four-person app should stay within or near free quotas, but costs are not guaranteed (Firestore reads/writes, function invocations, scheduler job, Hosting transfer). Set a budget alert.
+## 3. Behaviour changes versus the Cloud Functions version
+- 4-digit PIN → 6-digit PIN; setup code and custom lock removed; users cannot set their own first PIN (admin creates accounts).
+- Scores/key reveal are delayed as above (previously instant).
+- Admin cannot delete an exam that has attempts (checked in the UI; the admin is trusted) and no per-exam `attemptCount`.
+- Old attempts scored by the previous backend are shown with their stored values (read-only). Old exams must be **re-saved once** in the editor (adds `questionIds`) before they can be attempted.
+- The app UI is English only (no Arabic UI existed in this codebase).
 
-1. Create a Firebase project at console.firebase.google.com; upgrade to Blaze.
-2. Enable **Firestore** (production mode). **Authentication needs no provider**: custom tokens work without enabling one, but open Authentication once so the service is initialized.
-3. `firebase login` then `firebase use --add` (pick the project).
-4. Project settings → Your apps → Web app; paste the config into `public/js/firebase-config.js`.
-5. Custom-token signing: in Google Cloud IAM, grant your functions' runtime service account (default: `<project-number>-compute@developer.gserviceaccount.com`) the role **Service Account Token Creator** on itself. Without it `loginWithPin` fails with a signBlob permission error.
-6. `cp functions/.env.example functions/.env` and set `SETUP_CODE` (and `PIN_PEPPER`). Never commit it.
-7. `cd functions && npm install && cd ..`
-8. Deploy: `firebase deploy --only firestore,functions,hosting` (indexes can take a few minutes to build; admin log filters fail until then).
-9. Users: there is no seeding step. Each person opens the site, taps their name, and sets a PIN (with the setup code). Roles come from code, so Abood is admin automatically, nobody else can be. To reset a forgotten PIN, delete the `pinSecrets/<user>` document in the console.
-10. Local run: `firebase emulators:start`, set `USE_EMULATORS = true` in firebase-config.js, open http://localhost:5000.
-11. Updating later: edit, then `firebase deploy` (or `--only hosting` / `--only functions`).
+## 4. Setup (nothing here is done automatically)
+Prerequisites: Node 20+, `npm i -g firebase-tools`, Java (tests only).
+1. Firebase console → project **abood-cv** → Authentication → Sign-in method → enable **Email/Password**.
+2. Authentication → Users → **Add user** four times: `abood@quizverse.app`, `loge@quizverse.app`, `jana@quizverse.app`, `kinda@quizverse.app`, each with a 6-digit numeric password (the PIN) you give to that person. (Different, longer passwords also work, but the login box accepts 6 digits.)
+3. Authentication → Settings → User actions → **disable "Enable create (sign-up)"**.
+4. Project settings → Your apps → Web app: paste `apiKey` and `appId` into `public/js/firebase-config.js` (`projectId`/`authDomain` are preset to `abood-cv`).
+5. PIN reset = change the password of that user in the console.
+6. Old backend cleanup (optional, your call): previously deployed functions keep running/billing until removed with `firebase functions:delete <name> --project abood-cv`; old `pinSecrets`, `leaderboard*`, `attemptCount` data is unused and can be deleted from the console.
 
-## 5. Importing exams from ChatGPT
-Admin → Import JSON → copy the prompt, run it in ChatGPT yourself, paste the JSON, validate, review the highlighted correct answers, then *Import as draft* (or *Edit questions first*). The site never calls any AI API. All imported text is rendered with `textContent`, never `innerHTML`. Limits: 200 questions, 400,000 characters. Dates need a timezone offset (e.g. `+03:00`).
+### Deploy (manual)
+```
+# 1) Hosting (new frontend)
+firebase deploy --only hosting --project abood-cv
+# 2) Rules + indexes: deploy rules together with (or right after) the new frontend. They are incompatible with the OLD
+#    frontend and the old frontend is incompatible with them, so do both in one sitting after the tests pass:
+firebase deploy --only firestore:rules,firestore:indexes --project abood-cv
+```
+Never run a bare `firebase deploy` from an old checkout (it would try to deploy the removed functions target).
+Local: `firebase emulators:start` (Auth + Firestore + Hosting), set `USE_EMULATORS = true` in `firebase-config.js`, create the four users in the Auth emulator UI.
 
-## 6. Testing
-Executed during development (output shown in the final message): `npm --prefix functions test` (scoring + validation unit tests), syntax checks of every module, loading `functions/index.js` and listing its exports.
-
-**Not executed here, you must run them:** `npm i && npm run test:rules` (Firestore Security Rules tests in `tests/rules.test.js`, needs Java + emulator), and the end-to-end checklist below with the emulators or a real project. The code has never run against a live Firebase project.
-
-Manual acceptance checklist
-- Each of the 4 users sets a PIN, signs out, signs in; wrong PIN is rejected and 5 wrong PINs lock.
-- Loge cannot open `#/admin` (redirects) and Firestore reads of `examKeys`, `pinSecrets`, `activityLogs` fail from the browser console.
-- Abood imports valid JSON (preview shows keys), bad JSON shows readable errors; publish, unpublish, duplicate, delete.
-- Opening/closing dates are honoured; attempt limit stops the next attempt; refresh mid-exam keeps the timer; waiting out the timer finalizes; double submit gives the same score.
-- Leaderboard ordering and tie-breakers, week/month filters; history/dashboard charts match stored attempts.
-- Mobile (~360 px) and desktop layouts, dark mode, keyboard navigation.
-
-## 7. Known limitations
-- 4-digit PINs (see above). No App Check or per-IP rate limiting; consider enabling App Check.
-- Editing an exam's questions while someone is mid-attempt may change how that in-progress attempt is scored (finished attempts are never re-scored).
-- Week/month leaderboards are aggregated in the browser from `leaderboardEntries` (fine for 4 users).
-- `answer_submitted` logs every answer change (more writes). The CSP in `firebase.json` is strict and untested against every Firebase SDK path; relax `connect-src` if the console shows blocked requests.
-- Sweeper runs every 15 minutes, so an abandoned attempt can show as in progress for a short time after its deadline (it is finalized immediately whenever the user or admin opens it).
+## 5. Tests
+- `npm test`: unit tests for scoring (correct/incorrect/unanswered/late answers, speed bonus) and exam validation.
+- `npm run test:rules`: Firestore Security Rules tests (emulator): unauthenticated access, own/foreign attempts, unpublished exams, key and question reveal timing, forged starts/answers/finalization, admin escalation, admin exam CRUD, audit-log attribution. Needs Java and `firebase-tools`. Expected permission-denied results are passing outcomes.
 
 ## Layout
-`public/` static site (single-page app, hash routes) · `functions/` trusted backend + unit tests · `firestore.rules`, `firestore.indexes.json`, `firebase.json` · `tests/rules.test.js`.
+`public/` static app (hash routes) · `public/js/services.js` all Firestore operations (replaces the former functions) · `firestore.rules` · `firestore.indexes.json` · `firebase.json` (Hosting + Firestore only) · `.firebaserc` (`abood-cv`) · `tests/`.

@@ -1,4 +1,4 @@
-// Authoritative scoring (server only). speedBonus = floor(base * 0.25 * max(0, 1 - elapsed/budget)).
+// Scoring, recomputed by clients from rule-protected raw data (server-timestamped answers) AFTER the delayed key reveal. Not a trusted server calculation.
 export const SPEED_FACTOR = 0.25;
 export const DEFAULT_POINTS = { easy: 100, medium: 200, hard: 300 };
 
