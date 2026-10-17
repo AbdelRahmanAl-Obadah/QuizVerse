@@ -1,5 +1,5 @@
 import { db, doc, getDoc } from './api.js';
-import { startAttempt, getAttempt, saveAnswer, recordView, finalizeAttempt, getResult } from './services.js';
+import { changePin, startAttempt, getAttempt, saveAnswer, recordView, finalizeAttempt, getResult } from './services.js';
 import { state, navigate, onCleanup } from './state.js';
 import { h, icon, avatar, chart, empty, loading, confirmDialog, toast, fmtDate, fmtShort, fmtN, fmtPct, fmtDur, startOfPeriod } from './ui.js';
 import { ms, USER_META, COMPLETED, STATUS_LABEL, statusClass, loadSummaries, loadSummariesSince, loadBoardData, sortBoard, loadExams, loadAttempts, availability } from './data.js';
@@ -184,12 +184,56 @@ export async function leaderboard(v) {
   v.replaceChildren(head('Leaderboard', seg), table); await draw();
 }
 
-// Public profile: only the data the app deliberately shares (summary + per-attempt points/accuracy).
+// Public profile page: what the app deliberately shares (ranking, totals, per-exam points/accuracy/time). Own page adds PIN change.
+function pinField(id, label, auto) {
+  const i = h('input', { type: 'password', inputmode: 'numeric', maxlength: '6', autocomplete: auto, id, required: true });
+  i.addEventListener('input', () => { i.value = i.value.replace(/\D/g, '').slice(0, 6); });
+  return { i, el: h('div', { class: 'field' }, h('label', { for: id }, label), i) };
+}
+function pinCard() {
+  const cur = pinField('pin-cur', 'Current PIN', 'current-password'), nw = pinField('pin-new', 'New PIN (6 digits)', 'new-password'), cf = pinField('pin-cf', 'Confirm new PIN', 'new-password');
+  const msg = h('div', { class: 'err', role: 'alert' }), go = h('button', { class: 'btn primary', type: 'submit' }, 'Change PIN');
+  const form = h('form', { class: 'card stack', novalidate: true, style: { maxWidth: '420px' } }, h('h2', { style: { margin: 0 } }, 'Change PIN'),
+    h('p', { class: 'small muted', style: { margin: 0 } }, 'Only you see this section. The PIN must be exactly 6 digits so you can still sign in with it.'), cur.el, nw.el, cf.el, msg, go);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault(); msg.textContent = '';
+    if (cur.i.value.length !== 6) msg.textContent = 'Enter your current 6-digit PIN.';
+    else if (nw.i.value.length !== 6) msg.textContent = 'The new PIN must be exactly 6 digits.';
+    else if (nw.i.value === cur.i.value) msg.textContent = 'The new PIN must be different from the current one.';
+    else if (nw.i.value !== cf.i.value) msg.textContent = 'The new PIN and its confirmation do not match.';
+    if (msg.textContent) return;
+    go.disabled = true;
+    try { await changePin(cur.i.value, nw.i.value); form.reset(); toast('PIN changed.'); } catch (e) { msg.textContent = e.message; } finally { go.disabled = false; }
+  });
+  return form;
+}
 export async function profile(v, { id }) {
   if (!USER_META[id]) return navigate('/leaderboard');
-  const { summaries: sums, entries: all } = await loadBoardData();
-  const s = sums.find((x) => x.userId === id) || {}, rank = sortBoard(sums).findIndex((x) => x.userId === id) + 1, e = all.filter((x) => x.userId === id);
-  v.replaceChildren(head(USER_META[id].name, h('a', { class: 'btn', href: '#/leaderboard' }, 'Leaderboard')), h('div', { class: 'row', style: { marginBottom: '16px' } }, avatar(id, USER_META[id].name, 56), h('span', { class: 'chip' }, 'Shared statistics')),
-    h('div', { class: 'grid g4' }, stat('Total points', fmtN(s.totalPoints)), stat('Rank', rank && s.totalPoints != null ? '#' + rank : '—'), stat('Completed exams', fmtN(s.completedAttempts)), stat('Total attempts', fmtN(s.attemptsStarted)), stat('Average accuracy', fmtPct(s.averageAccuracy)), stat('Best score', fmtN(s.bestScore))),
-    h('div', { class: 'grid g2', style: { marginTop: '16px' } }, h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.points })), { title: 'Points per examination', bar: true })), h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.accuracy })), { title: 'Accuracy progression (%)', unit: '%' }))));
+  const meId = state.user.id, own = id === meId;
+  const [{ summaries: sums, entries: all }, exams, uSnap] = await Promise.all([loadBoardData(), loadExams().catch(() => []), getDoc(doc(db, 'users', id)).catch(() => null)]);
+  const titles = Object.fromEntries(exams.map((x) => [x.id, x.title]));
+  const board = sortBoard(sums), s = sums.find((x) => x.userId === id) || {}, rank = board.findIndex((x) => x.userId === id) + 1;
+  const e = all.filter((x) => x.userId === id), recent = [...e].reverse();
+  const avgScore = e.length ? e.reduce((t, x) => t + x.points, 0) / e.length : 0;
+  const last = uSnap?.exists?.() ? ms(uSnap.data().lastActivityAt) : null;
+  const ordinal = rank ? '#' + rank + ' of ' + board.length : '—';
+  const mine = sums.find((x) => x.userId === meId) || {}, gap = (s.totalPoints || 0) - (mine.totalPoints || 0);
+  const standings = h('div', { class: 'table-wrap' }, h('table', { class: 'stack-sm' }, h('thead', {}, h('tr', {}, ['Rank', 'User', 'Points', 'Completed', 'Avg accuracy'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, board.map((x, i) => h('tr', { class: x.userId === id ? 'me-row' : '' }, h('td', { 'data-label': 'Rank' }, h('span', { class: 'rank r' + (i + 1) }, i + 1)),
+      h('td', { 'data-label': 'User' }, h('a', { href: '#/user/' + x.userId, class: 'row', style: { textDecoration: 'none', color: 'inherit', flexWrap: 'nowrap' } }, avatar(x.userId, USER_META[x.userId].name, 30), h('strong', {}, USER_META[x.userId].name))),
+      h('td', { 'data-label': 'Points' }, h('strong', {}, fmtN(x.totalPoints))), h('td', { 'data-label': 'Completed' }, fmtN(x.completedAttempts)), h('td', { 'data-label': 'Avg accuracy' }, x.completedAttempts ? fmtPct(x.averageAccuracy) : '—'))))));
+  const results = recent.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'stack-sm' }, h('thead', {}, h('tr', {}, ['Examination', 'Date', 'Points', 'Accuracy', 'Time'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, recent.map((x) => h('tr', {}, h('td', { 'data-label': 'Examination', class: 'title-cell' }, titles[x.examId] || x.examId), h('td', { 'data-label': 'Date', class: 'nowrap' }, fmtDate(ms(x.finalizedAt))),
+      h('td', { 'data-label': 'Points' }, h('strong', {}, fmtN(x.points))), h('td', { 'data-label': 'Accuracy' }, fmtPct(x.accuracy)), h('td', { 'data-label': 'Time' }, fmtDur(x.seconds))))))) : empty('No results yet', 'Finished examinations will appear here.');
+  v.replaceChildren(head(USER_META[id].name, own && h('span', { class: 'chip acc' }, 'This is you'), h('a', { class: 'btn', href: '#/leaderboard' }, 'Leaderboard')),
+    h('div', { class: 'row', style: { marginBottom: '16px' } }, avatar(id, USER_META[id].name, 72), h('div', {}, h('div', { class: 'row' }, h('span', { class: 'chip' }, USER_META[id].role === 'admin' ? 'Administrator' : 'Member'), rank ? h('span', { class: 'chip ok' }, 'Rank ' + ordinal) : null),
+      h('div', { class: 'small muted', style: { marginTop: '6px' } }, last ? 'Last active ' + fmtDate(last) : 'No activity yet'))),
+    h('div', { class: 'grid g4' }, stat('Rank', rank ? '#' + rank : '—', rank ? `of ${board.length}` : ''), stat('Total points', fmtN(s.totalPoints)), stat('Completed exams', fmtN(s.completedAttempts), s.pendingAttempts ? `${s.pendingAttempts} awaiting reveal` : ''), stat('Total attempts', fmtN(s.attemptsStarted)),
+      stat('Average accuracy', fmtPct(s.averageAccuracy)), stat('Best score', fmtN(s.bestScore)), stat('Average score', fmtN(avgScore)), stat('Time in exams', fmtDur(s.totalCompletionSeconds)),
+      !own && stat('Compared with you', (gap > 0 ? '+' : '') + fmtN(gap), gap > 0 ? `${USER_META[id].name} leads by ${fmtN(gap)}` : gap < 0 ? `You lead by ${fmtN(-gap)}` : 'Tied on points')),
+    h('div', { class: 'grid g2', style: { marginTop: '16px' } }, h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.points })), { title: 'Points per examination', bar: true })), h('div', { class: 'card' }, chart(e.map((x) => ({ x: fmtShort(ms(x.finalizedAt)), y: x.accuracy })), { title: 'Accuracy progression (%)', unit: '%' }))),
+    h('h2', { style: { margin: '24px 0 12px' } }, 'Standings'), standings,
+    h('h2', { style: { margin: '24px 0 12px' } }, 'Examination results'), results,
+    h('p', { class: 'small muted', style: { marginTop: '12px' } }, 'Only finalized attempts whose answer key has been released to you are counted.'),
+    own && h('div', { style: { marginTop: '24px' } }, pinCard()));
 }

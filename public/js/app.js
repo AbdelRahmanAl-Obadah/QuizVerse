@@ -25,6 +25,7 @@ const routes = [
 const NAV = [
   ['/dashboard', 'home', 'Dashboard'], ['/exams', 'book', 'Examinations'], ['/history', 'clock', 'History'], ['/leaderboard', 'trophy', 'Leaderboard'],
 ];
+const myNav = () => ['/user/' + state.user.id, 'users', 'My profile'];
 const ADMIN_NAV = [
   ['/admin', 'shield', 'Overview'], ['/admin/exams', 'list', 'Manage exams'], ['/admin/import', 'upload', 'Import JSON'], ['/admin/users', 'users', 'Users'], ['/admin/attempts', 'clock', 'All attempts'], ['/admin/logs', 'chart', 'Activity logs'],
 ];
@@ -32,10 +33,10 @@ let shell = null;
 function buildShell() {
   const link = ([p, i, t]) => h('a', { href: '#' + p, 'data-path': p }, icon(i), h('span', {}, t));
   const logout = () => signOut(auth);
-  const nav = h('nav', { class: 'nav', 'aria-label': 'Main' }, NAV.map(link), state.user.role === 'admin' && [h('h4', {}, 'Administration'), ADMIN_NAV.map(link)]);
+  const nav = h('nav', { class: 'nav', 'aria-label': 'Main' }, [...NAV, myNav()].map(link), state.user.role === 'admin' && [h('h4', {}, 'Administration'), ADMIN_NAV.map(link)]);
   const side = h('aside', { class: 'side' },
     h('a', { class: 'brand', href: '#/dashboard' }, h('i', {}, icon('check')), 'QuizVerse'), nav,
-    h('div', { class: 'me' }, avatar(state.user.id, state.user.name, 36), h('div', { class: 'grow' }, h('strong', {}, state.user.name), h('div', { class: 'small muted' }, state.user.role === 'admin' ? 'Administrator' : 'Member')), themeButton(),
+    h('div', { class: 'me' }, avatar(state.user.id, state.user.name, 36), h('a', { class: 'grow', href: '#/user/' + state.user.id, style: { textDecoration: 'none', color: 'inherit' }, 'aria-label': 'My profile' }, h('strong', {}, state.user.name), h('div', { class: 'small muted' }, state.user.role === 'admin' ? 'Administrator' : 'Member')), themeButton(),
       h('button', { class: 'btn ghost sm', 'aria-label': 'Sign out', onclick: logout }, icon('logout'))));
   const top = h('div', { class: 'topbar' }, h('strong', {}, 'QuizVerse'), h('div', { class: 'row' }, themeButton(), h('button', { class: 'btn ghost sm', 'aria-label': 'Sign out', onclick: logout }, icon('logout'))));
   const view = h('main', { class: 'main', id: 'view', tabindex: '-1' });

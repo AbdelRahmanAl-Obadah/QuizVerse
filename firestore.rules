@@ -1,197 +1,197 @@
-rules_version = '2';
-// QuizVerse security rules (no Cloud Functions). Identity = Firebase Auth email/password for exactly four
-// accounts: abood@, loge@, jana@, kinda@ quizverse.app. The "handle" is the part before '@'; abood is admin.
-// DELAYED REVEAL: answer keys (and question text) are never readable by a user while they can still benefit.
-// Scores are NOT stored; they are recomputed by clients from rule-protected raw data (server-timestamped answers).
-service cloud.firestore {
-  match /databases/{database}/documents {
+  rules_version = '2';
+  // QuizVerse security rules (no Cloud Functions). Identity = Firebase Auth email/password for exactly four
+  // accounts: abood@, loge@, jana@, kinda@ quizverse.app. The "handle" is the part before '@'; abood is admin.
+  // DELAYED REVEAL: answer keys (and question text) are never readable by a user while they can still benefit.
+  // Scores are NOT stored; they are recomputed by clients from rule-protected raw data (server-timestamped answers).
+  service cloud.firestore {
+    match /databases/{database}/documents {
 
-    // ---------- identity ----------
-    function signedIn() { return request.auth != null && request.auth.token.email != null && request.auth.token.email.matches('^(abood|loge|jana|kinda)@quizverse[.]app$'); }
-    function me() { return request.auth.token.email.split('@')[0]; }
-    function isAdmin() { return signedIn() && me() == 'abood'; }
-    function idOk(s) { return s is string && s.matches('^[A-Za-z0-9_-]{1,40}$'); }
+      // ---------- identity ----------
+      function signedIn() { return request.auth != null && request.auth.token.email != null && request.auth.token.email.matches('^(abood|loge|jana|kinda)@quizverse[.]app$'); }
+      function me() { return request.auth.token.email.split('@')[0]; }
+      function isAdmin() { return signedIn() && me() == 'abood'; }
+      function idOk(s) { return s is string && s.matches('^[A-Za-z0-9_-]{1,40}$'); }
 
-    // ---------- helpers ----------
-    function examData(id) { return get(/databases/$(database)/documents/exams/$(id)).data; }
-    function lockOf(handle, examId) { return /databases/$(database)/documents/attemptLocks/$(handle + '_' + examId); }
-    function attemptDoc(id) { return /databases/$(database)/documents/attempts/$(id); }
-    function closed(ex) { return ex.get('closingAt', null) != null && request.time > ex.closingAt; }
-    // The caller has used every attempt and none is active: nothing left to gain from the key.
-    function exhausted(examId) {
-      return exists(lockOf(me(), examId))
-        && get(lockOf(me(), examId)).data.activeAttemptId == null
-        && get(lockOf(me(), examId)).data.count >= examData(examId).maxAttempts;
-    }
-    function revealOk(examId) {
-      return idOk(examId) && examData(examId).publicationStatus == 'published' && (closed(examData(examId)) || exhausted(examId));
-    }
-    // Caller has a live attempt on this exam (questions are readable only then).
-    function hasActive(examId) {
-      return exists(lockOf(me(), examId))
-        && get(lockOf(me(), examId)).data.activeAttemptId != null
-        && request.time < deadlineOf(get(attemptDoc(get(lockOf(me(), examId)).data.activeAttemptId)).data);
-    }
-    // deadline = min(startedAt + duration, closingAt) from values frozen in the attempt at creation
-    function endByDuration(a) { return a.startedAt + duration.value(a.durationMinutes, 'm'); }
-    function deadlineOf(a) {
-      return a.get('closingAt', null) == null ? endByDuration(a) : (a.closingAt < endByDuration(a) ? a.closingAt : endByDuration(a));
-    }
+      // ---------- helpers ----------
+      function examData(id) { return get(/databases/$(database)/documents/exams/$(id)).data; }
+      function lockOf(handle, examId) { return /databases/$(database)/documents/attemptLocks/$(handle + '_' + examId); }
+      function attemptDoc(id) { return /databases/$(database)/documents/attempts/$(id); }
+      function closed(ex) { return ex.get('closingAt', null) != null && request.time > ex.closingAt; }
+      // The caller has used every attempt and none is active: nothing left to gain from the key.
+      function exhausted(examId) {
+        return exists(lockOf(me(), examId))
+          && get(lockOf(me(), examId)).data.activeAttemptId == null
+          && get(lockOf(me(), examId)).data.count >= examData(examId).maxAttempts;
+      }
+      function revealOk(examId) {
+        return idOk(examId) && examData(examId).publicationStatus == 'published' && (closed(examData(examId)) || exhausted(examId));
+      }
+      // Caller has a live attempt on this exam (questions are readable only then).
+      function hasActive(examId) {
+        return exists(lockOf(me(), examId))
+          && get(lockOf(me(), examId)).data.activeAttemptId != null
+          && request.time < deadlineOf(get(attemptDoc(get(lockOf(me(), examId)).data.activeAttemptId)).data);
+      }
+      // deadline = min(startedAt + duration, closingAt) from values frozen in the attempt at creation
+      function endByDuration(a) { return a.startedAt + duration.value(a.durationMinutes, 'm'); }
+      function deadlineOf(a) {
+        return a.get('closingAt', null) == null ? endByDuration(a) : (a.closingAt < endByDuration(a) ? a.closingAt : endByDuration(a));
+      }
 
-    // ---------- users ----------
-    function displayNameOf(h) { return h == 'abood' ? 'Abood' : h == 'loge' ? 'Loge' : h == 'jana' ? 'Jana' : 'Kinda'; }
-    match /users/{h} {
-      allow read: if signedIn();
-      allow create: if signedIn() && h == me()
-        && request.resource.data.keys().hasOnly(['displayName', 'role', 'accountStatus', 'createdAt', 'lastLoginAt', 'lastActivityAt'])
-        && request.resource.data.displayName == displayNameOf(h)
-        && request.resource.data.role == (isAdmin() ? 'admin' : 'user')
-        && request.resource.data.accountStatus == 'active'
-        && request.resource.data.createdAt == request.time
-        && request.resource.data.lastLoginAt == request.time
-        && request.resource.data.lastActivityAt == request.time;
-      allow update: if signedIn() && h == me()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLoginAt', 'lastActivityAt'])
-        && request.resource.data.lastActivityAt == request.time
-        && (request.resource.data.lastLoginAt == resource.data.lastLoginAt || request.resource.data.lastLoginAt == request.time);
-      allow delete: if false;
-    }
-
-    // ---------- exams (admin-managed) ----------
-    function validExam(d) {
-      return d.title is string && d.title.size() > 0 && d.title.size() <= 150
-        && d.publicationStatus in ['draft', 'published']
-        && d.durationMinutes is int && d.durationMinutes >= 1 && d.durationMinutes <= 1440
-        && d.maxAttempts is int && d.maxAttempts >= 1 && d.maxAttempts <= 100
-        && d.questionCount is int && d.questionCount >= 0 && d.questionCount <= 200
-        && d.questionIds is list && d.questionIds.size() == d.questionCount
-        && (d.publicationStatus == 'draft' || d.questionCount > 0)
-        && (d.get('openingAt', null) == null || d.openingAt is timestamp)
-        && (d.get('closingAt', null) == null || d.closingAt is timestamp);
-    }
-    match /exams/{id} {
-      allow read: if signedIn() && (isAdmin() || resource.data.publicationStatus == 'published');
-      allow create, update: if isAdmin() && validExam(request.resource.data);
-      allow delete: if isAdmin();
-    }
-    // Question text: only while the caller has a live attempt, or once the key may be revealed (review). Admin always.
-    match /examQuestions/{id} {
-      allow get: if isAdmin() || (signedIn() && idOk(id) && examData(id).publicationStatus == 'published' && (hasActive(id) || revealOk(id)));
-      allow list: if false;
-      allow write: if isAdmin();
-    }
-    // Answer keys + explanations: admin, or delayed reveal only.
-    match /examKeys/{id} {
-      allow get: if isAdmin() || (signedIn() && revealOk(id));
-      allow list: if false;
-      allow write: if isAdmin();
-    }
-
-    // ---------- attempt locks (attempt count + single active attempt) ----------
-    match /attemptLocks/{lid} {
-      allow get: if signedIn() && (isAdmin() || lid.matches('^' + me() + '_.*'));
-      allow list: if false;
-      // Start: written together with the new attempt document in one batch.
-      allow create, update: if signedIn()
-        && request.resource.data.keys().hasOnly(['userId', 'examId', 'count', 'activeAttemptId'])
-        && idOk(request.resource.data.examId)
-        && lid == request.resource.data.userId + '_' + request.resource.data.examId
-        && ((request.resource.data.userId == me() && startingAttempt())
-            || ((request.resource.data.userId == me() || isAdmin()) && releasingAttempt()));
-      allow delete: if false;
-    }
-    function startingAttempt() {
-      return request.resource.data.activeAttemptId is string
-        && !exists(attemptDoc(request.resource.data.activeAttemptId))
-        && existsAfter(attemptDoc(request.resource.data.activeAttemptId))
-        && request.resource.data.count == (resource == null ? 1 : resource.data.count + 1)
-        && (resource == null || resource.data.activeAttemptId == null);
-    }
-    function releasingAttempt() {
-      return resource != null && resource.data.activeAttemptId != null && request.resource.data.activeAttemptId == null
-        && request.resource.data.count == resource.data.count
-        && get(attemptDoc(resource.data.activeAttemptId)).data.status == 'in_progress'
-        && getAfter(attemptDoc(resource.data.activeAttemptId)).data.status in ['submitted', 'timed_out'];
-    }
-
-    // ---------- attempts ----------
-    function startOk(aid, d) {
-      return signedIn()
-        && d.keys().hasOnly(['userId', 'examId', 'examTitle', 'attemptNumber', 'status', 'startedAt', 'durationMinutes', 'closingAt', 'questionCount', 'layout'])
-        && d.userId == me() && idOk(d.examId)
-        && d.attemptNumber is int && d.attemptNumber >= 1
-        && aid == me() + '_' + d.examId + '_' + string(d.attemptNumber)
-        && d.status == 'in_progress'
-        && d.startedAt == request.time
-        && examData(d.examId).publicationStatus == 'published'
-        && d.attemptNumber <= examData(d.examId).maxAttempts
-        && (examData(d.examId).get('openingAt', null) == null || examData(d.examId).openingAt <= request.time)
-        && (examData(d.examId).get('closingAt', null) == null || examData(d.examId).closingAt > request.time)
-        && d.closingAt == examData(d.examId).get('closingAt', null)
-        && d.durationMinutes == examData(d.examId).durationMinutes
-        && d.examTitle == examData(d.examId).title
-        && d.questionCount == examData(d.examId).questionCount
-        && d.layout.keys().hasOnly(['order', 'optOrder'])
-        && d.layout.order is list && d.layout.order.size() == d.questionCount
-        && d.layout.order.toSet() == examData(d.examId).questionIds.toSet()
-        && d.layout.optOrder is map
-        // lock must move from (attemptNumber-1, idle) to (attemptNumber, this attempt) in the same batch
-        && (d.attemptNumber == 1 ? (!exists(lockOf(me(), d.examId)) || (get(lockOf(me(), d.examId)).data.count == 0 && get(lockOf(me(), d.examId)).data.activeAttemptId == null))
-            : (get(lockOf(me(), d.examId)).data.count == d.attemptNumber - 1 && get(lockOf(me(), d.examId)).data.activeAttemptId == null))
-        && getAfter(lockOf(me(), d.examId)).data.count == d.attemptNumber
-        && getAfter(lockOf(me(), d.examId)).data.activeAttemptId == aid;
-    }
-    // Finalization: only status/time fields change. Early submit = owner at request.time; otherwise exactly the deadline.
-    function finalizeOk(aid, b, a) {
-      return signedIn() && (b.userId == me() || isAdmin())
-        && b.status == 'in_progress'
-        && a.diff(b).affectedKeys().hasOnly(['status', 'submittedAt', 'finalizedAt', 'finalizedBy'])
-        && a.finalizedAt == request.time && a.finalizedBy == me()
-        && (request.time < deadlineOf(b)
-            ? (a.status == 'submitted' && a.submittedAt == request.time && b.userId == me())
-            : (a.status == 'timed_out' && a.submittedAt == deadlineOf(b)))
-        && get(lockOf(b.userId, b.examId)).data.activeAttemptId == aid
-        && getAfter(lockOf(b.userId, b.examId)).data.activeAttemptId == null;
-    }
-    match /attempts/{aid} {
-      // Others may see finalized attempt metadata only (no answers) so the leaderboard can list them.
-      allow read: if signedIn() && (isAdmin() || resource.data.userId == me() || resource.data.status in ['submitted', 'timed_out']);
-      allow create: if startOk(aid, request.resource.data);
-      allow update: if finalizeOk(aid, resource.data, request.resource.data);
-      allow delete: if false;
-
-      // Per-question raw data: v = first time shown, selected/t = latest answer. All times are server timestamps.
-      match /qs/{qid} {
-        function att() { return get(attemptDoc(aid)).data; }
-        function live() { return signedIn() && att().userId == me() && att().status == 'in_progress' && request.time < deadlineOf(att()) && qid in att().layout.order; }
-        function validSel(d) {
-          return d.t == request.time && (d.selected == null || (d.selected is int && d.selected >= 0 && d.selected <= 3));
-        }
-        // Owner/admin anytime; others only for finalized attempts once THEY may see the key.
-        allow read: if signedIn() && (isAdmin() || att().userId == me() || (att().status in ['submitted', 'timed_out'] && revealOk(att().examId)));
-        allow create: if live() && (
-            (request.resource.data.keys().hasOnly(['v']) && request.resource.data.v == request.time)
-            || (request.resource.data.keys().hasOnly(['selected', 't']) && validSel(request.resource.data)));
-        allow update: if live()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['selected', 't'])
-          && validSel(request.resource.data);
+      // ---------- users ----------
+      function displayNameOf(h) { return h == 'abood' ? 'Abood' : h == 'loge' ? 'Loge' : h == 'jana' ? 'Jana' : 'Kinda'; }
+      match /users/{h} {
+        allow read: if signedIn();
+        allow create: if signedIn() && h == me()
+          && request.resource.data.keys().hasOnly(['displayName', 'role', 'accountStatus', 'createdAt', 'lastLoginAt', 'lastActivityAt'])
+          && request.resource.data.displayName == displayNameOf(h)
+          && request.resource.data.role == (isAdmin() ? 'admin' : 'user')
+          && request.resource.data.accountStatus == 'active'
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.lastLoginAt == request.time
+          && request.resource.data.lastActivityAt == request.time;
+        allow update: if signedIn() && h == me()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLoginAt', 'lastActivityAt'])
+          && request.resource.data.lastActivityAt == request.time
+          && (request.resource.data.lastLoginAt == resource.data.lastLoginAt || request.resource.data.lastLoginAt == request.time);
         allow delete: if false;
       }
-    }
 
-    // ---------- audit log (client-written, attribution enforced; NOT tamper-proof against the actor's own entries) ----------
-    match /activityLogs/{id} {
-      allow read: if isAdmin();
-      allow create: if signedIn()
-        && request.resource.data.keys().hasOnly(['actorUserId', 'action', 'examId', 'attemptId', 'timestamp', 'metadata'])
-        && request.resource.data.actorUserId == me()
-        && request.resource.data.timestamp == request.time
-        && request.resource.data.metadata is map && request.resource.data.metadata.size() <= 8
-        && ((request.resource.data.action in ['login_success', 'exam_started', 'exam_completed', 'exam_timed_out'])
-            || (isAdmin() && request.resource.data.action in ['exam_created', 'exam_imported', 'exam_edited', 'exam_published', 'exam_unpublished', 'exam_duplicated', 'exam_deleted']));
-      allow update, delete: if false;
-    }
+      // ---------- exams (admin-managed) ----------
+      function validExam(d) {
+        return d.title is string && d.title.size() > 0 && d.title.size() <= 150
+          && d.publicationStatus in ['draft', 'published']
+          && d.durationMinutes is int && d.durationMinutes >= 1 && d.durationMinutes <= 1440
+          && d.maxAttempts is int && d.maxAttempts >= 1 && d.maxAttempts <= 100
+          && d.questionCount is int && d.questionCount >= 0 && d.questionCount <= 200
+          && d.questionIds is list && d.questionIds.size() == d.questionCount
+          && (d.publicationStatus == 'draft' || d.questionCount > 0)
+          && (d.get('openingAt', null) == null || d.openingAt is timestamp)
+          && (d.get('closingAt', null) == null || d.closingAt is timestamp);
+      }
+      match /exams/{id} {
+        allow read: if signedIn() && (isAdmin() || resource.data.publicationStatus == 'published');
+        allow create, update: if isAdmin() && validExam(request.resource.data);
+        allow delete: if isAdmin();
+      }
+      // Question text: only while the caller has a live attempt, or once the key may be revealed (review). Admin always.
+      match /examQuestions/{id} {
+        allow get: if isAdmin() || (signedIn() && idOk(id) && examData(id).publicationStatus == 'published' && (hasActive(id) || revealOk(id)));
+        allow list: if false;
+        allow write: if isAdmin();
+      }
+      // Answer keys + explanations: admin, or delayed reveal only.
+      match /examKeys/{id} {
+        allow get: if isAdmin() || (signedIn() && revealOk(id));
+        allow list: if false;
+        allow write: if isAdmin();
+      }
 
-    match /{document=**} { allow read, write: if false; }
+      // ---------- attempt locks (attempt count + single active attempt) ----------
+      match /attemptLocks/{lid} {
+        allow get: if signedIn() && (isAdmin() || lid.matches('^' + me() + '_.*'));
+        allow list: if false;
+        // Start: written together with the new attempt document in one batch.
+        allow create, update: if signedIn()
+          && request.resource.data.keys().hasOnly(['userId', 'examId', 'count', 'activeAttemptId'])
+          && idOk(request.resource.data.examId)
+          && lid == request.resource.data.userId + '_' + request.resource.data.examId
+          && ((request.resource.data.userId == me() && startingAttempt())
+              || ((request.resource.data.userId == me() || isAdmin()) && releasingAttempt()));
+        allow delete: if false;
+      }
+      function startingAttempt() {
+        return request.resource.data.activeAttemptId is string
+          && !exists(attemptDoc(request.resource.data.activeAttemptId))
+          && existsAfter(attemptDoc(request.resource.data.activeAttemptId))
+          && request.resource.data.count == (resource == null ? 1 : resource.data.count + 1)
+          && (resource == null || resource.data.activeAttemptId == null);
+      }
+      function releasingAttempt() {
+        return resource != null && resource.data.activeAttemptId != null && request.resource.data.activeAttemptId == null
+          && request.resource.data.count == resource.data.count
+          && get(attemptDoc(resource.data.activeAttemptId)).data.status == 'in_progress'
+          && getAfter(attemptDoc(resource.data.activeAttemptId)).data.status in ['submitted', 'timed_out'];
+      }
+
+      // ---------- attempts ----------
+      function startOk(aid, d) {
+        return signedIn()
+          && d.keys().hasOnly(['userId', 'examId', 'examTitle', 'attemptNumber', 'status', 'startedAt', 'durationMinutes', 'closingAt', 'questionCount', 'layout'])
+          && d.userId == me() && idOk(d.examId)
+          && d.attemptNumber is int && d.attemptNumber >= 1
+          && aid == me() + '_' + d.examId + '_' + string(d.attemptNumber)
+          && d.status == 'in_progress'
+          && d.startedAt == request.time
+          && examData(d.examId).publicationStatus == 'published'
+          && d.attemptNumber <= examData(d.examId).maxAttempts
+          && (examData(d.examId).get('openingAt', null) == null || examData(d.examId).openingAt <= request.time)
+          && (examData(d.examId).get('closingAt', null) == null || examData(d.examId).closingAt > request.time)
+          && d.closingAt == examData(d.examId).get('closingAt', null)
+          && d.durationMinutes == examData(d.examId).durationMinutes
+          && d.examTitle == examData(d.examId).title
+          && d.questionCount == examData(d.examId).questionCount
+          && d.layout.keys().hasOnly(['order', 'optOrder'])
+          && d.layout.order is list && d.layout.order.size() == d.questionCount
+          && d.layout.order.toSet() == examData(d.examId).questionIds.toSet()
+          && d.layout.optOrder is map
+          // lock must move from (attemptNumber-1, idle) to (attemptNumber, this attempt) in the same batch
+          && (d.attemptNumber == 1 ? (!exists(lockOf(me(), d.examId)) || (get(lockOf(me(), d.examId)).data.count == 0 && get(lockOf(me(), d.examId)).data.activeAttemptId == null))
+              : (get(lockOf(me(), d.examId)).data.count == d.attemptNumber - 1 && get(lockOf(me(), d.examId)).data.activeAttemptId == null))
+          && getAfter(lockOf(me(), d.examId)).data.count == d.attemptNumber
+          && getAfter(lockOf(me(), d.examId)).data.activeAttemptId == aid;
+      }
+      // Finalization: only status/time fields change. Early submit = owner at request.time; otherwise exactly the deadline.
+      function finalizeOk(aid, b, a) {
+        return signedIn() && (b.userId == me() || isAdmin())
+          && b.status == 'in_progress'
+          && a.diff(b).affectedKeys().hasOnly(['status', 'submittedAt', 'finalizedAt', 'finalizedBy'])
+          && a.finalizedAt == request.time && a.finalizedBy == me()
+          && (request.time < deadlineOf(b)
+              ? (a.status == 'submitted' && a.submittedAt == request.time && b.userId == me())
+              : (a.status == 'timed_out' && a.submittedAt == deadlineOf(b)))
+          && get(lockOf(b.userId, b.examId)).data.activeAttemptId == aid
+          && getAfter(lockOf(b.userId, b.examId)).data.activeAttemptId == null;
+      }
+      match /attempts/{aid} {
+        // Others may see finalized attempt metadata only (no answers) so the leaderboard can list them.
+        allow read: if signedIn() && (isAdmin() || resource.data.userId == me() || resource.data.status in ['submitted', 'timed_out']);
+        allow create: if startOk(aid, request.resource.data);
+        allow update: if finalizeOk(aid, resource.data, request.resource.data);
+        allow delete: if false;
+
+        // Per-question raw data: v = first time shown, selected/t = latest answer. All times are server timestamps.
+        match /qs/{qid} {
+          function att() { return get(attemptDoc(aid)).data; }
+          function live() { return signedIn() && att().userId == me() && att().status == 'in_progress' && request.time < deadlineOf(att()) && qid in att().layout.order; }
+          function validSel(d) {
+            return d.t == request.time && (d.selected == null || (d.selected is int && d.selected >= 0 && d.selected <= 3));
+          }
+          // Owner/admin anytime; others only for finalized attempts once THEY may see the key.
+          allow read: if signedIn() && (isAdmin() || att().userId == me() || (att().status in ['submitted', 'timed_out'] && revealOk(att().examId)));
+          allow create: if live() && (
+              (request.resource.data.keys().hasOnly(['v']) && request.resource.data.v == request.time)
+              || (request.resource.data.keys().hasOnly(['selected', 't']) && validSel(request.resource.data)));
+          allow update: if live()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['selected', 't'])
+            && validSel(request.resource.data);
+          allow delete: if false;
+        }
+      }
+
+      // ---------- audit log (client-written, attribution enforced; NOT tamper-proof against the actor's own entries) ----------
+      match /activityLogs/{id} {
+        allow read: if isAdmin();
+        allow create: if signedIn()
+          && request.resource.data.keys().hasOnly(['actorUserId', 'action', 'examId', 'attemptId', 'timestamp', 'metadata'])
+          && request.resource.data.actorUserId == me()
+          && request.resource.data.timestamp == request.time
+          && request.resource.data.metadata is map && request.resource.data.metadata.size() <= 8
+          && ((request.resource.data.action in ['login_success', 'exam_started', 'exam_completed', 'exam_timed_out'])
+              || (isAdmin() && request.resource.data.action in ['exam_created', 'exam_imported', 'exam_edited', 'exam_published', 'exam_unpublished', 'exam_duplicated', 'exam_deleted']));
+        allow update, delete: if false;
+      }
+
+      match /{document=**} { allow read, write: if false; }
+    }
   }
-}

@@ -1,6 +1,6 @@
 // Replaces the former Cloud Functions. Every privileged rule is enforced by firestore.rules; this file only
 // performs the allowed writes/reads. Nothing here is a security boundary.
-import { auth, db, collection, doc, getDoc, getDocs, setDoc, updateDoc, writeBatch, query, where, serverTimestamp, Timestamp, limit, signInWithEmailAndPassword } from './api.js';
+import { auth, db, collection, doc, getDoc, getDocs, setDoc, updateDoc, writeBatch, query, where, serverTimestamp, Timestamp, limit, signInWithEmailAndPassword, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from './api.js';
 import { ACCOUNT_DOMAIN } from './firebase-config.js';
 import { validateExam } from './validation.js';
 import { scoreAttempt } from './scoring.js';
@@ -22,6 +22,21 @@ export async function login(handle, pin) {
     throw err('internal', 'Could not sign in. Try again.');
   }
   const b = writeBatch(db); logTo(b, 'login_success'); await b.commit().catch(() => {});
+}
+/** Change the signed-in user's own PIN (re-authenticates with the current PIN first). */
+export async function changePin(current, next) {
+  const u = auth.currentUser; if (!u) throw err('unauthenticated', 'Please sign in again.');
+  try {
+    await reauthenticateWithCredential(u, EmailAuthProvider.credential(u.email, current));
+    await updatePassword(u, next);
+  } catch (e) {
+    const c = e.code || '';
+    if (c.includes('invalid-credential') || c.includes('wrong-password')) throw err('permission-denied', 'Your current PIN is wrong.');
+    if (c.includes('too-many-requests')) throw err('resource-exhausted', 'Too many attempts. Wait a few minutes and try again.');
+    if (c.includes('weak-password')) throw err('invalid-argument', 'The new PIN is too weak.');
+    if (c.includes('network')) throw err('unavailable', 'Network problem. Check your connection and try again.');
+    throw err('internal', 'Could not change the PIN. Try again.');
+  }
 }
 /** Create/refresh the public profile (display name + last activity). Best-effort; the app does not depend on it. */
 export async function touchProfile() {
