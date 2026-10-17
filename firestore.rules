@@ -1,0 +1,48 @@
+rules_version = '2';
+// Clients can only READ. All writes (scores, attempts, logs, exams, PINs) are done by Cloud Functions
+// using the Admin SDK, which bypasses these rules. Rules are not filters: queries must include the same
+// constraints (e.g. where('userId','==',uid) on attempts, where('publicationStatus','==','published') on exams).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null && request.auth.token.role in ['admin', 'user']; }
+    function isAdmin()  { return signedIn() && request.auth.token.role == 'admin'; }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /exams/{examId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.publicationStatus == 'published');
+      allow write: if false;
+    }
+    // Question text (no answer keys). Users receive questions only through the startAttempt/getAttempt functions.
+    match /examQuestions/{examId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // Answer keys: never readable by any client.
+    match /examKeys/{examId} {
+      allow read, write: if false;
+    }
+    match /attempts/{attemptId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
+    }
+    match /leaderboardSummaries/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /leaderboardEntries/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /activityLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // pinSecrets, attemptLocks and anything else: no client access.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
